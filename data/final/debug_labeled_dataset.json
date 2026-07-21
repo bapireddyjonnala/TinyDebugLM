@@ -1,0 +1,20 @@
+[
+  {
+    "instruction": "Analyze this software issue and explain the possible cause and solution.",
+    "input": {
+      "title": "Fix UnboundLocalError in OpenAPI generation for custom response classes",
+      "description": "## Problem\n\nIn `get_openapi_path` (`fastapi/openapi/utils.py`), `status_code` is assigned **only inside** the branches, then used unconditionally as a dict key:\n\n```python\nif route.status_code is not None:\n    status_code = str(route.status_code)\nelse:\n    response_signature = inspect.signature(current_response_class.__init__)\n    status_code_param = response_signature.parameters.get(\"status_code\")\n    if status_code_param is not None:\n        if isinstance(status_code_param.default, int):\n            status_code = str(status_code_param.default)\noperation.setdefault(\"responses\", {}).setdefault(status_code, {})[\"description\"] = route.response_description\n```\n\nWhen `route.status_code is None` **and** the response class's `__init__` has no `status_code` parameter (or its default isn't an `int`), `status_code` is never bound → `UnboundLocalError` on the `setdefault(status_code, ...)` line.\n\n## Impact\n\n`get_openapi_path` → `get_openapi` → `Application.openapi()`, so this doesn't just affect one route — it crashes **the whole schema generation**, taking down `/openapi.json`, `/docs`, and `/redoc` for the entire app.\n\nIt's reachable with a common wrapper pattern: a custom `response_class` whose `__init__` is `def __init__(self, *args, **kwargs)` (or types `status_code` as `int | None = None`).\n\n## Reproduction\n\n```python\nfrom fastapi import FastAPI\nfrom fastapi.responses import JSONResponse\n\nclass MyResponse(JSONResponse):\n    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n\napp = FastAPI()\n\n@app.get(\"/x\", response_class=MyResponse)\ndef x():\n    return {\"a\": 1}\n\napp.openapi()   # before: UnboundLocalError at openapi/utils.py; after: works\n```\n\n## Fix\n\nBind a fallback (`\"200\"`, FastAPI's default route status) before the branches so `status_code` is always defined. The existing (working) paths are unchanged — they still overwrite it.\n\n```python\nstatus_code = \"200\"\nif route.status_code is not None:\n    ...\n```\n",
+      "labels": []
+    },
+    "output": {
+      "cause": "In `fastapi/openapi/utils.py`, the variable `status_code` is only assigned inside conditional branches that depend on the presence of a `status_code` attribute on the route or a default integer value in the response class's `__init__`. When neither condition is met—e.g., a custom response class whose `__init__` accepts arbitrary `*args, **kwargs` and has no `status_code` parameter—`status_code` remains unbound. The subsequent unconditional use of `status_code` as a dictionary key triggers an `UnboundLocalError`, causing the entire OpenAPI schema generation to fail.",
+      "solution": "Initialize `status_code` with FastAPI's default value (`\"200\"`) before the conditional logic. Then let the existing branches overwrite it when appropriate. This guarantees that `status_code` is always defined, preventing the crash while preserving current behavior.",
+      "explanation": "The fix adds a simple line:\n```python\nstatus_code = \"200\"\n```\nbefore the `if route.status_code is not None:` block. This ensures that even if the route has no explicit status code and the response class does not provide one, the OpenAPI generator will still use the default 200 status. The rest of the logic remains unchanged, so routes that specify a status code or have a response class with a default integer status code continue to work as before. This change eliminates the `UnboundLocalError` and restores stability to `/openapi.json`, `/docs`, and `/redoc` for applications using custom response classes."
+    },
+    "metadata": {
+      "source": "GitHub",
+      "url": "https://github.com/fastapi/fastapi/pull/16025",
+      "state": "closed"
+    }
+  }
+]
